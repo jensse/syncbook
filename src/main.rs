@@ -1,3 +1,11 @@
+//! `syncbook` pulls a reMarkable tablet notebook's pages down over SSH and
+//! renders them to PNG/SVG, and pushes a single edited `.rm` page file back
+//! up safely (backup + hash-verify). Both directions connect through the
+//! same `~/.ssh/config` host alias that plain `ssh`/`scp` on the command
+//! line would use, so nothing reMarkable-specific needs to be configured
+//! beyond that one alias -- see [`ensure_ssh_host_configured`] for the
+//! first-run setup wizard that writes it.
+
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
@@ -6,8 +14,12 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Absolute path on the reMarkable device to xochitl's notebook data store.
+/// Every notebook's `<uuid>.content`/`<uuid>.metadata` files and its
+/// per-page `<uuid>/<page-uuid>.rm` files live directly under here.
 const REMOTE_XOCHITL: &str = "/home/root/.local/share/remarkable/xochitl";
 
+/// Top-level CLI arguments, parsed by `clap`'s derive macro.
 #[derive(Parser)]
 #[command(name = "syncbook", version, about = "Pull and push reMarkable notebooks over SSH")]
 struct Cli {
@@ -19,13 +31,15 @@ struct Cli {
     command: Commands,
 }
 
+/// The two subcommands syncbook supports: pulling pages down for viewing,
+/// and pushing one edited page back up.
 #[derive(Subcommand)]
 enum Commands {
     /// Pull a notebook's pages down and render them to PNG/SVG.
     Pullrm {
         /// Notebook visibleName (as shown in the reMarkable UI) or its UUID.
         notebook: String,
-        /// Output directory (default: ./<notebook name>)
+        /// Output directory (default: `./<notebook name>`)
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -40,6 +54,13 @@ enum Commands {
     },
 }
 
+/// Entry point: parses CLI args, makes sure the configured SSH host alias
+/// is set up (running the first-run wizard if not), then dispatches to
+/// [`pullrm`] or [`pushrm`].
+///
+/// # Errors
+/// Returns an error if host setup fails, or if the dispatched subcommand
+/// does.
 fn main() -> Result<()> {
     let cli = Cli::parse();
     ensure_ssh_host_configured(&cli.host)?;
@@ -128,6 +149,9 @@ fn ensure_ssh_host_configured(host: &str) -> Result<()> {
     std::process::exit(0);
 }
 
+/// Returns true if `config_text` already has a `Host` line listing `host`
+/// among its space-separated patterns (SSH config allows more than one
+/// pattern per `Host` line, e.g. `Host foo bar`).
 fn host_block_exists(config_text: &str, host: &str) -> bool {
     config_text.lines().any(|line| {
         let line = line.trim();
@@ -139,6 +163,9 @@ fn host_block_exists(config_text: &str, host: &str) -> bool {
     })
 }
 
+/// Expands a leading `~/` in `input` to `home`; returns `input` unchanged
+/// otherwise. A minimal stand-in for shell tilde expansion, since this
+/// value comes from an interactive prompt rather than an actual shell.
 fn shellexpand_tilde(input: &str, home: &Path) -> String {
     let input = input.trim();
     if let Some(rest) = input.strip_prefix("~/") {
@@ -148,6 +175,11 @@ fn shellexpand_tilde(input: &str, home: &Path) -> String {
     }
 }
 
+/// Writes `message` to stderr (keeping stdout clean for piping) and reads
+/// back one line of input with the trailing newline stripped.
+///
+/// # Errors
+/// Returns an error if reading from stdin fails.
 fn prompt(message: &str) -> Result<String> {
     eprint!("{message}");
     io::stderr().flush().ok();
@@ -158,6 +190,12 @@ fn prompt(message: &str) -> Result<String> {
 
 // --- ssh/scp helpers ---------------------------------------------------------
 
+/// Runs `remote_command` on `host` via `ssh` and returns its captured
+/// stdout.
+///
+/// # Errors
+/// Returns an error if the `ssh` process can't be spawned, or exits
+/// non-zero (its stderr is included in the returned error).
 fn ssh_output(host: &str, remote_command: &str) -> Result<String> {
     let out = Command::new("ssh")
         .arg("-o")
@@ -176,6 +214,12 @@ fn ssh_output(host: &str, remote_command: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Runs `remote_command` on `host` via `ssh`, letting its stdout/stderr
+/// pass through to the terminal instead of capturing them.
+///
+/// # Errors
+/// Returns an error if the `ssh` process can't be spawned, or exits
+/// non-zero.
 fn ssh_run(host: &str, remote_command: &str) -> Result<()> {
     let status = Command::new("ssh")
         .arg("-o")
@@ -190,6 +234,10 @@ fn ssh_run(host: &str, remote_command: &str) -> Result<()> {
     Ok(())
 }
 
+/// Copies `remote_path` on `host` down to `local_path` via `scp`.
+///
+/// # Errors
+/// Returns an error if `scp` can't be spawned or exits non-zero.
 fn scp_down(host: &str, remote_path: &str, local_path: &Path) -> Result<()> {
     let status = Command::new("scp")
         .arg("-o")
@@ -204,6 +252,10 @@ fn scp_down(host: &str, remote_path: &str, local_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Copies `local_path` up to `remote_path` on `host` via `scp`.
+///
+/// # Errors
+/// Returns an error if `scp` can't be spawned or exits non-zero.
 fn scp_up(host: &str, local_path: &Path, remote_path: &str) -> Result<()> {
     let status = Command::new("scp")
         .arg("-o")
@@ -226,6 +278,9 @@ fn shq(value: &str) -> String {
 
 // --- notebook lookup ----------------------------------------------------------
 
+/// Returns true if `s` has the canonical UUID shape (five hyphen-separated
+/// hex groups, lengths 8-4-4-4-12) -- the format reMarkable uses for both
+/// notebook and page identifiers.
 fn looks_like_uuid(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     parts.len() == 5
@@ -235,6 +290,14 @@ fn looks_like_uuid(s: &str) -> bool {
             .all(|(len, part)| part.len() == *len && part.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
+/// Resolves `notebook` to a UUID. Returned as-is if it already
+/// [`looks_like_uuid`]; otherwise grep'd for on the device by matching its
+/// `visibleName` field across every `*.metadata` file under
+/// [`REMOTE_XOCHITL`].
+///
+/// # Errors
+/// Returns an error if no notebook matches, or if more than one does --
+/// in the latter case the caller should pass the UUID directly instead.
 fn find_notebook_uuid(host: &str, notebook: &str) -> Result<String> {
     if looks_like_uuid(notebook) {
         return Ok(notebook.to_string());
@@ -265,6 +328,11 @@ fn find_notebook_uuid(host: &str, notebook: &str) -> Result<String> {
     }
 }
 
+/// Reads and parses a notebook's `<uuid>.content` file from the device --
+/// this is where the ordered list of page ids (`cPages.pages`) lives.
+///
+/// # Errors
+/// Returns an error if the file can't be read over SSH or isn't valid JSON.
 fn fetch_content(host: &str, uuid: &str) -> Result<serde_json::Value> {
     let raw = ssh_output(host, &format!("cat {REMOTE_XOCHITL}/{uuid}.content"))?;
     serde_json::from_str(&raw).context("parsing .content JSON")
@@ -305,6 +373,18 @@ fn render_rm(rm_path: &Path, svg_path: &Path, png_path: &Path) -> Result<()> {
 
 // --- pullrm ---------------------------------------------------------------
 
+/// Pulls every page of `notebook` down from `host`, renders each to
+/// PNG/SVG via [`render_rm`], and writes a copy of the notebook's
+/// `.content` JSON alongside them in `output` (default: a sanitized
+/// version of `notebook`'s name in the current directory).
+///
+/// A page referenced by `.content` whose `.rm` file is missing on the
+/// device is reported and skipped rather than aborting the whole pull --
+/// see the comment at the skip site for how that situation arises.
+///
+/// # Errors
+/// Returns an error if the notebook can't be resolved, its `.content`
+/// can't be fetched or parsed, or any page's download/render fails.
 fn pullrm(host: &str, notebook: &str, output: Option<PathBuf>) -> Result<()> {
     let uuid = find_notebook_uuid(host, notebook)?;
     let content = fetch_content(host, &uuid)?;
@@ -354,6 +434,9 @@ fn pullrm(host: &str, notebook: &str, output: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Replaces every character that isn't alphanumeric, `-`, or `_` with `_`,
+/// so a notebook's `visibleName` can double as a filesystem-safe default
+/// output directory name.
 fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
@@ -362,6 +445,18 @@ fn sanitize_filename(name: &str) -> String {
 
 // --- pushrm -----------------------------------------------------------------
 
+/// Replaces one page's `.rm` file in `notebook` on `host` with `file`,
+/// safely: backs up the notebook's current `.metadata`, `.content`, and
+/// (if it already exists) the target page's `.rm` file first; uploads to
+/// a `.new` temp path and renames it into place so a failed transfer
+/// can't leave a half-written page file; then reads the pushed file back
+/// and compares its SHA-256 against the local original.
+///
+/// # Errors
+/// Returns an error if the notebook can't be resolved, any backup or
+/// upload step fails, or the post-push hash verification doesn't match --
+/// in which case the backup taken at the start of the call is left in
+/// place for manual recovery.
 fn pushrm(host: &str, notebook: &str, page: &str, file: &Path) -> Result<()> {
     let uuid = find_notebook_uuid(host, notebook)?;
     let remote_page_path = format!("{REMOTE_XOCHITL}/{uuid}/{page}.rm");
@@ -418,6 +513,13 @@ fn pushrm(host: &str, notebook: &str, page: &str, file: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Returns the current UTC time as `YYYYMMDDTHHMMSSZ`, used to namespace
+/// each push's backup directory.
+///
+/// # Panics
+/// Panics if the `date` command can't be spawned (see the `.expect()`
+/// below) -- this is treated as an environment precondition, not a
+/// recoverable error.
 fn current_timestamp() -> String {
     let out = Command::new("date")
         .args(["-u", "+%Y%m%dT%H%M%SZ"])
@@ -426,6 +528,11 @@ fn current_timestamp() -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// Reads `path` fully into memory and returns its SHA-256 digest as a
+/// lowercase hex string.
+///
+/// # Errors
+/// Returns an error if the file can't be read.
 fn sha256_file(path: &Path) -> Result<String> {
     let data = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let mut hasher = Sha256::new();
