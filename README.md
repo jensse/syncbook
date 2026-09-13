@@ -1,3 +1,8 @@
+# README
+
+The motivation for building this is a need for visual-thinking and communication with agents. I prefer drawing on paper, and this is the closest i get to sharing a whiteboard among multiple personas an myself. It is not real-time yet but we will get there.
+
+
 # syncbook -- notes for README.md
 
 Raw steps and data collected while building this, kept here so nothing gets forgotten while the real README.md gets written by hand. Not meant to be the final doc -- reorganize/rewrite freely.
