@@ -1,0 +1,94 @@
+name: release
+
+# Push a tag like v0.1.0 to build binaries and publish them as a GitHub Release.
+# Run manually (workflow_dispatch) to build the same binaries as workflow
+# artifacts only, without creating a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v${cargo_version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${cargo_version}"
+            exit 1
+          fi
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ "${GITHUB_REF_TYPE}" = "tag" ] || version="$(git rev-parse --short HEAD)"
+          name="syncbook-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/syncbook" README.md LICENSE "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            dist/${{ steps.package.outputs.name }}.tar.gz
+            dist/${{ steps.package.outputs.name }}.tar.gz.sha256
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --generate-notes -R "$GITHUB_REPOSITORY"
+          fi
