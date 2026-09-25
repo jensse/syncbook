@@ -1,6 +1,6 @@
 [package]
 name = "syncbook"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 description = "Pull and push reMarkable tablet notebooks over SSH"
 license = "MIT"

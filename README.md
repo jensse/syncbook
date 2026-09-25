@@ -59,6 +59,21 @@ cp target/release/syncbook ~/bin/syncbook
 
 Make sure `~/bin` is on your `PATH` (add `export PATH="$HOME/bin:$PATH"` to your shell profile if it isn't already).
 
+## Releasing
+
+Prebuilt binaries (Linux x86_64/aarch64 static musl, macOS arm64/x86_64) are
+built by `.github/workflows/release.yml` and attached to a GitHub Release when
+a `v*` tag is pushed. The tag must match the version in `Cargo.toml`, or the
+build stops at the first step:
+
+```bash
+# bump version = "X.Y.Z" in Cargo.toml, then:
+cargo build            # updates Cargo.lock
+git commit -am "Release X.Y.Z"
+git tag vX.Y.Z
+git push origin main vX.Y.Z
+```
+
 ## First run
 
 `syncbook` doesn't keep its own config file -- both `pullrm` and `pushrm` connect via a normal `~/.ssh/config` host alias (default name: `remarkable`), so plain `ssh remarkable` / `scp remarkable:...` on the command line behave identically to what `syncbook` does internally.
